@@ -50,7 +50,11 @@ asynchronous-codec = "0.6"
 async-trait = "0.1"
 connection-string = "0.2"
 num-traits = "0.2"
-uuid = "1.0"
+uuid = { version = "1.16", features = ["v4"] }
+oauth2 = { version = "5.0.0", features = ["reqwest"], optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
+url = { version = "2.5.4", optional = true }
+webbrowser = { version = "1.0.4", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winauth = { version = "0.0.4", optional = true }
@@ -166,10 +170,10 @@ path = "./runtimes-macro"
 names = "0.14"
 anyhow = "1"
 env_logger = "0.9"
-azure_identity = "0.5.0"
-oauth2 = "4.2.3"
+azure_identity = "0.21.0"
+oauth2 = { version = "5.0.0", features = ["reqwest-blocking"]}
 url = "2.2.2"
-reqwest = "0.11.10"
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 paste = "1.0"
 indicatif = "0.17"
 chrono = "0.4.38"
@@ -190,8 +194,10 @@ all = [
     "rust_decimal",
     "bigdecimal",
     "native-tls",
+    "aad-interactive-auth",
 ]
-default = ["tds73", "winauth", "native-tls"]
+
+default = ["tds73", "winauth", "native-tls", "aad-interactive-auth"]
 tds73 = []
 docs = []
 sql-browser-async-std = ["async-std"]
@@ -202,3 +208,4 @@ bigdecimal = ["bigdecimal_"]
 rustls = ["tokio-rustls", "tokio-util", "rustls-pemfile", "rustls-native-certs"]
 native-tls = ["async-native-tls"]
 vendored-openssl = ["opentls"]
+aad-interactive-auth = ["oauth2", "reqwest", "url", "webbrowser", "tokio/net", "tokio/time", "tokio/sync"]

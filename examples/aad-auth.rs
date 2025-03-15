@@ -8,12 +8,11 @@
 //!   - CLIENT_SECRET: service principal secret;
 //!   - TENANT_ID: tenant id of service principal and sql instance;
 //!   - SERVER: SQL server URI
-use azure_identity::client_credentials_flow;
-use oauth2::{ClientId, ClientSecret};
-use std::{env, sync::Arc};
+use oauth2::{basic::BasicClient, AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl};
+use tokio_util::compat::TokioAsyncWriteCompatExt;
+use std::env;
 use tiberius::{AuthMethod, Client, Config, Query};
 use tokio::net::TcpStream;
-use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -25,23 +24,29 @@ async fn main() -> anyhow::Result<()> {
     );
     let tenant_id = env::var("TENANT_ID").expect("Missing TENANT_ID environment variable.");
 
-    let client = Arc::new(reqwest::Client::new());
-    // This will give you the final token to use in authorization.
-    let token = client_credentials_flow::perform(
-        client,
-        &client_id,
-        &client_secret,
-        &["https://management.azure.com/"],
-        &tenant_id,
-    )
-    .await?;
+    let client = BasicClient::new(client_id)
+        .set_client_secret(client_secret)
+        .set_auth_uri(AuthUrl::new(format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize"))?)
+        .set_token_uri(TokenUrl::new(format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"))?);
 
+    let http_client = reqwest::blocking::ClientBuilder::new()
+        // Following redirects opens the client up to SSRF vulnerabilities.
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("Client should build");
+    
+    let token_result = client
+        .exchange_client_credentials()
+        .add_scope(Scope::new("read".to_string()))
+        .request(&http_client)?;
+
+    // This will give you the final token to use in authorization.
     let mut config = Config::new();
     let server = env::var("SERVER").expect("Missing SERVER environment variable.");
     config.host(server);
     config.port(1433);
     config.authentication(AuthMethod::AADToken(
-        token.access_token().secret().to_string(),
+        token_result.access_token().secret().to_string(),
     ));
     config.trust_cert();
 

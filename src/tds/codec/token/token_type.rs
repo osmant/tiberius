@@ -48,6 +48,9 @@ uint_enum! {
         /// The SSPI token returned during the login process.
         Sspi = 0xED,
 
+        /// Token returned when the client indicates to use federated authentication via MSAL during the login process.
+        FedAuthInfo = 0xEE,
+
         /// A notification of an environment change (such as database and
         /// language).
         EnvChange = 0xE3,

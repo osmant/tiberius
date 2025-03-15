@@ -9,7 +9,7 @@ use crate::{
     tds::{
         codec::{
             self, Encode, LoginMessage, Packet, PacketCodec, PacketHeader, PacketStatus,
-            PreloginMessage, TokenDone,
+            PreloginMessage, TokenDone, TokenFedAuthInfo,
         },
         stream::TokenStream,
         Context, HEADER_BYTES,
@@ -88,7 +88,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             buf: BytesMut::new(),
         };
 
-        let fed_auth_required = matches!(config.auth, AuthMethod::AADToken(_));
+        let fed_auth_required = matches!(config.auth, 
+            AuthMethod::AADToken(_)
+            | AuthMethod::AADInteractive(_)
+        );
 
         let prelogin = connection
             .prelogin(config.encryption, fed_auth_required)
@@ -124,6 +127,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
     /// Flush the incoming token stream until receiving `SSPI` token.
     async fn flush_sspi(&mut self) -> crate::Result<TokenSspi> {
         TokenStream::new(self).flush_sspi().await
+    }
+
+    /// Flush the incoming token stream until receiving `FEDAUTHINFO` token.
+    async fn flush_fed_auth_info(&mut self) -> crate::Result<TokenFedAuthInfo> {
+        TokenStream::new(self).flush_fed_auth_info().await
     }
 
     #[cfg(any(
@@ -277,6 +285,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         self.send(PacketHeader::pre_login(id), msg).await?;
 
         let response: PreloginMessage = codec::collect_from(self).await?;
+        dbg!(&response);
         // threadid (should be empty when sent from server to client)
         debug_assert_eq!(response.thread_id, 0);
         Ok(response)
@@ -428,6 +437,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                 self.send(PacketHeader::login(id), login_message).await?;
                 self = self.post_login_encryption(encryption);
             }
+            AuthMethod::AADInteractive(auth) => {
+                login_message.aad_interactive(prelogin.fed_auth_required);
+                let id = self.context.next_packet_id();
+                dbg!(&login_message);
+                self.send(PacketHeader::login(id), login_message).await?;
+
+                // federated authentication
+                let fed_auth_info = self.flush_fed_auth_info().await?;
+                dbg!(&fed_auth_info);
+                self.authenticate_aad_interactive(&auth, &fed_auth_info).await?;
+                self = self.post_login_encryption(encryption);
+            },
         }
 
         Ok(self)
@@ -572,5 +593,309 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SqlReadBytes for Connection<S> {
     /// A mutable reference to the current execution context.
     fn context_mut(&mut self) -> &mut Context {
         &mut self.context
+    }
+}
+
+#[cfg(feature = "aad-interactive-auth")]
+mod aad {
+    use std::borrow::Cow;
+    use std::error::Error;
+    use std::sync::Arc;
+
+    use futures_util::{AsyncRead, AsyncWrite};
+
+    use crate::{client::AadAuth, tds::codec::{TokenFedAuthInfo, FedAuthToken, PacketHeader}, Error as TdsError};
+
+    use super::Connection;
+
+    const DEFAULT_SCOPE_SUFFIX: &str = "/.default";
+    // Microsoft Entra ID client ID for public clients accessing Azure SQL
+    const AAD_PUBLIC_CLIENT_ID: &str = "2fd908ad-0664-4344-b9be-cd3e8b574c38";
+    const DEFAULT_HOST: &str = "localhost";
+    const DEFAULT_PORT: u16 = 50968;
+    
+    impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
+         /// Authenticate with Azure Active Directory using an interactive flow
+        pub(super) async fn authenticate_aad_interactive(&mut self, auth: &AadAuth, fed_auth_info: &TokenFedAuthInfo) 
+        -> crate::Result<()> 
+        {
+            let (sts_url, spn) = (fed_auth_info.sts_url(), fed_auth_info.spn());
+            dbg!(sts_url, spn);
+
+            let separator_index = 
+                sts_url.len() 
+                    - 1 
+                    - sts_url
+                        .bytes()
+                        .rev()
+                        .position(|b| b == b'/')
+                        .ok_or(TdsError::Protocol(
+                            "Received an invalid sts_url in federated authentication info".into()
+                        ))?;
+            let authority = &sts_url[..separator_index];
+            let audience = &sts_url[separator_index + 1..];
+            dbg!(&authority, &audience);
+
+            let scope = Self::get_scope(spn);
+            dbg!(&scope);
+            
+            // Get access token through interactive authentication
+            match self.perform_interactive_auth(audience, &auth.user, &scope).await {
+                Ok(token) => {
+                    // Send the token to the server
+                    self.send_fed_auth_token(token).await
+                },
+                Err(e) => {
+                    Err(TdsError::Protocol(format!("Failed to perform interactive authentication: {}", e).into()))
+                }
+            }
+        }
+
+        #[cfg(feature = "aad-interactive-auth")]
+        /// Performs interactive OAuth2 authentication with Azure AD using the PKCE flow
+        async fn perform_interactive_auth(&self, tenant_id: &str, username: &str, scope: &str) 
+            -> Result<String, Box<dyn Error + Send + Sync>> 
+        {
+            use oauth2::{AuthType, AuthUrl, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope, TokenUrl};
+            use oauth2::basic::BasicClient;
+            use oauth2::{AuthorizationCode, TokenResponse};
+            use reqwest::{redirect, ClientBuilder};
+            use tokio::net::TcpListener;
+            use tokio::sync::Mutex;
+            use tokio::time::{Duration, Instant};
+            use url::Url;
+            use uuid::Uuid;
+            use std::net::{SocketAddr, IpAddr, Ipv4Addr};
+            
+            // Find an available port and create the server
+            let port = Self::find_available_port().await.ok_or("Could not find an available port")?;
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+            let listener = TcpListener::bind(addr).await?;
+            let redirect_url = format!("http://{}:{}", DEFAULT_HOST, port);
+            tracing::info!("Using redirect URL: {}", redirect_url);
+            tracing::info!("Local server bound to: {}:{}", DEFAULT_HOST, port);
+
+            let client = BasicClient::new(ClientId::new(AAD_PUBLIC_CLIENT_ID.to_string()))
+                .set_auth_uri(AuthUrl::new(format!(
+                    "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize",
+                    tenant_id
+                ))?)
+                .set_token_uri(TokenUrl::new(format!(
+                    "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+                    tenant_id
+                ))?)
+                .set_auth_type(AuthType::RequestBody)
+                .set_redirect_uri(RedirectUrl::new(redirect_url)?);
+
+            let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+            
+            let state = CsrfToken::new(Uuid::new_v4().to_string());
+            let csrf_state_str = state.secret().clone();
+
+            // Generate the full authorization URL with all needed parameters
+            let (auth_url, _csrf_state) = client
+                .authorize_url(|| state)
+                .add_scope(Scope::new(scope.to_string()))
+                .add_scope(Scope::new("openid".to_string()))
+                .add_scope(Scope::new("profile".to_string()))
+                .add_scope(Scope::new("offline_access".to_string()))
+                .set_pkce_challenge(pkce_challenge)
+                .add_extra_param("login_hint", username)
+                .add_extra_param("x-anchormailbox", format!("upn:{}", username))
+                .add_extra_param("client-request-id", Uuid::new_v4().to_string())
+                .add_extra_param("x-client-SKU", "Rust-OAuth2")
+                .add_extra_param("x-client-Ver", "1.0.0")
+                .add_extra_param("prompt", "select_account")
+                .add_extra_param("client_info", "1")
+                .url();
+
+            tracing::info!("Opening browser to: {}", auth_url);
+            
+            // Open the browser with the authorization URL
+            if let Err(e) = webbrowser::open(auth_url.as_str()) {
+                tracing::warn!("Failed to open web browser: {}", e);
+                tracing::warn!("Please manually navigate to: {}", auth_url);
+            }
+            
+            // Create shared state for the authorization code
+            let auth_code = Arc::new(Mutex::new(None));
+            
+            // Accept connections in a loop with timeout
+            let timeout_duration = Duration::from_secs(120);
+            let start_time = Instant::now();
+            
+            // Create a reqwest client without following redirects
+            let http_client = ClientBuilder::new()
+                .redirect(redirect::Policy::none())
+                .build()?;
+
+            // Accept connections in a loop with timeout
+            while start_time.elapsed() < timeout_duration {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let auth_code_clone = Arc::clone(&auth_code);
+                        let csrf_state = csrf_state_str.clone();
+                        
+                        tokio::spawn(async move {
+                            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                            
+                            let mut socket = stream;
+                            let mut buffer = [0; 4096];
+                            let n = match socket.read(&mut buffer).await {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    tracing::error!("Failed to read from socket: {}", e);
+                                    return;
+                                }
+                            };
+                            
+                            let data = String::from_utf8_lossy(&buffer[..n]);
+                            
+                            // Extract request line
+                            let request_line = match data.lines().next() {
+                                Some(line) => line,
+                                None => return,
+                            };
+                            
+                            // Extract the path with query parameters
+                            let path = match request_line.split_whitespace().nth(1) {
+                                Some(path) => path,
+                                None => return,
+                            };
+                            
+                            // Parse the query parameters
+                            let query_string = match path.split('?').nth(1) {
+                                Some(query) => query,
+                                None => return,
+                            };
+                            
+                            // Parse the query string
+                            let parsed_url = match Url::parse(&format!("http://localhost/?{}", query_string)) {
+                                Ok(url) => url,
+                                Err(_) => return,
+                            };
+                            
+                            let pairs: Vec<_> = parsed_url.query_pairs().collect();
+                            
+                            let code = pairs.iter()
+                                .find(|(k, _)| k == "code")
+                                .map(|(_, v)| v.to_string());
+                            
+                            let state = pairs.iter()
+                                .find(|(k, _)| k == "state")
+                                .map(|(_, v)| v.to_string());
+                            
+                            // Verify the state parameter to prevent CSRF attacks
+                            if let Some(received_state) = state {
+                                if received_state != csrf_state {
+                                    let response = "HTTP/1.1 400 Bad Request\r\n\
+                                                   Content-Type: text/plain\r\n\
+                                                   \r\n\
+                                                   Invalid state parameter, possible CSRF attack";
+                                    let _ = socket.write_all(response.as_bytes()).await;
+                                    return;
+                                }
+                            }
+                            
+                            if let Some(code_value) = code {
+                                // Store the authorization code
+                                *auth_code_clone.lock().await = Some(code_value);
+                                
+                                // Send a successful response to the browser
+                                let response = "HTTP/1.1 200 OK\r\n\
+                                               Content-Type: text/html\r\n\
+                                               \r\n\
+                                               <html><body><h1>Authentication successful!</h1>\
+                                               <p>You can close this window and return to the application.</p></body></html>";
+                                let _ = socket.write_all(response.as_bytes()).await;
+                            }
+                        });
+
+                        // Check if we got the auth code
+                        if auth_code.lock().await.is_some() {
+                            break;
+                        }
+                    }
+                    Err(e) => tracing::error!("Failed to accept connection: {}", e),
+                }
+                
+                // A short sleep to avoid CPU spinning
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            
+            // Check if we timed out
+            if start_time.elapsed() >= timeout_duration {
+                return Err("Authentication timed out after 120 seconds".into());
+            }
+            
+            // Get the authorization code
+            let code = auth_code.lock().await.clone()
+                .ok_or("No authorization code received")?;
+            
+            tracing::info!("Received authorization code");
+            
+            let token_result = client
+                .exchange_code(AuthorizationCode::new(code))
+                .set_pkce_verifier(pkce_verifier)
+                .request_async(&http_client)
+                .await?;
+                
+            Ok(token_result.access_token().secret().to_string())
+        }
+
+        #[cfg(not(feature = "aad-interactive-auth"))]
+        /// Fallback implementation when aad-interactive-auth feature is not enabled
+        async fn perform_interactive_auth(&self, _authority: &str, _username: &str, _scope: &str) 
+            -> Result<String, Box<dyn Error + Send + Sync>> 
+        {
+            Err("AAD Interactive authentication requires the 'aad-interactive-auth' feature to be enabled.
+Add the following to your Cargo.toml:
+
+[dependencies]
+tiberius = { version = \"0.12.3\", features = [\"aad-interactive-auth\"] }
+
+Or, enable the feature in your dependency:
+
+[dependencies.tiberius]
+version = \"0.12.3\"
+features = [\"aad-interactive-auth\"]".into())
+        }
+
+        /// Constructs and sends the FEDAUTH token (0x08) with the provided access token.
+        #[inline]
+        async fn send_fed_auth_token(&mut self, access_token: impl AsRef<str>) -> crate::Result<()> {
+            let fed_auth_token_message = FedAuthToken::new(access_token.as_ref());
+            let id = self.context.next_packet_id();
+            self.send(PacketHeader::fed_auth_token(id), fed_auth_token_message).await?;
+            Ok(())
+        }
+
+        /// Constructs a scope with suffix `/.default`.
+        #[inline]
+        fn get_scope(spn: &str) -> Cow<'_, str> {
+            if spn.ends_with(DEFAULT_SCOPE_SUFFIX) { 
+                spn.into()
+            } 
+            else {
+                format!("{}{DEFAULT_SCOPE_SUFFIX}", spn.trim_end_matches('/')).into()
+            }
+        }
+
+        /// Helper function to find an available port for the local server
+        #[cfg(feature = "aad-interactive-auth")]
+        async fn find_available_port() -> Option<u16> {
+            use tokio::net::TcpListener;
+            use std::net::{SocketAddr, IpAddr, Ipv4Addr};
+            
+            let mut port = DEFAULT_PORT;
+            while port < u16::MAX {
+                let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+                if TcpListener::bind(addr).await.is_ok() {
+                    return Some(port);
+                }
+                port += 1;
+            }
+            None
+        }
     }
 }

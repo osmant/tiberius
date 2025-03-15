@@ -314,7 +314,22 @@ pub(crate) trait ConfigString {
             Some(val) if val.to_lowercase() == "sspi" || Self::parse_bool(val)? => {
                 Ok(AuthMethod::Integrated)
             }
-            _ => Ok(AuthMethod::sql_server(user.unwrap_or(""), pw.unwrap_or(""))),
+            _ => {
+                match self.dict().get("authentication") {
+                    Some(auth) => {
+                        match auth.to_lowercase().as_str() {
+                            "aadinteractive" | "activedirectoryinteractive" | "active directory interactive" => {
+                                match user {
+                                    Some(user) => Ok(AuthMethod::aad_interactive(user)),
+                                    None => Err(crate::Error::Conversion("Connection string: Missing user for AAD interactive".into())),
+                                }
+                            },
+                            _ => unimplemented!("Authentication method not supported!")
+                        }
+                    },
+                    _ => Ok(AuthMethod::sql_server(user.unwrap_or(""), pw.unwrap_or(""))),
+                }
+            }
         }
     }
 

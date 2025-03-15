@@ -92,6 +92,14 @@ impl PacketHeader {
         }
     }
 
+    pub fn fed_auth_token(id: u8) -> Self {
+        Self {
+            ty: PacketType::Fat,
+            status: PacketStatus::EndOfMessage,
+            ..Self::new(0, id)
+        }
+    }
+    
     pub fn batch(id: u8) -> Self {
         Self {
             ty: PacketType::SQLBatch,

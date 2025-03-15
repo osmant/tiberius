@@ -3,7 +3,7 @@ use crate::{
     client::Connection,
     tds::codec::{
         TokenColMetaData, TokenDone, TokenEnvChange, TokenError, TokenFeatureExtAck, TokenInfo,
-        TokenLoginAck, TokenOrder, TokenReturnValue, TokenRow,
+        TokenLoginAck, TokenOrder, TokenReturnValue, TokenRow, TokenFedAuthInfo
     },
     Error, SqlReadBytes, TokenType,
 };
@@ -30,6 +30,7 @@ pub enum ReceivedToken {
     LoginAck(TokenLoginAck),
     Sspi(TokenSspi),
     FeatureExtAck(TokenFeatureExtAck),
+    FedAuthInfo(TokenFedAuthInfo),
     Error(TokenError),
 }
 
@@ -57,16 +58,24 @@ where
         loop {
             match stream.try_next().await? {
                 Some(ReceivedToken::Error(error)) => {
+                    println!("1. Received error: {:?}", error);
                     if last_error.is_none() {
                         last_error = Some(error);
                     }
                 }
                 Some(ReceivedToken::Done(token)) => match (last_error, routing) {
-                    (Some(error), _) => return Err(Error::Server(error)),
-                    (_, Some(routing)) => return Err(routing),
+                    (Some(error), routing) => {
+                        println!("2. Received error: {:?}, Routing: {:?}", error, routing);
+                        return Err(Error::Server(error))
+                    },
+                    (_, Some(routing)) => {
+                        println!("3. Routing: {:?}", routing);
+                        return Err(routing)
+                    },
                     (_, _) => return Ok(token),
                 },
                 Some(ReceivedToken::EnvChange(TokenEnvChange::Routing { host, port })) => {
+                    println!("4. Routing {:?}, host: {:?}, port: {:?}", routing, host, port);
                     routing = Some(Error::Routing { host, port });
                 }
                 Some(_) => (),
@@ -97,6 +106,36 @@ where
         }
     }
 
+    pub(crate) async fn flush_fed_auth_info(self) -> crate::Result<TokenFedAuthInfo> {
+        let mut stream = self.try_unfold();
+        let mut last_error = None;
+        let mut routing = None;
+
+        loop {
+            match stream.try_next().await? {
+                Some(ReceivedToken::Error(error)) => {
+                    if last_error.is_none() {
+                        last_error = Some(error);
+                    }
+                },
+                Some(ReceivedToken::Done(_)) => match (last_error, routing) {
+                    (Some(error), _) => return Err(Error::Server(error)),
+                    (_, Some(routing)) => return Err(routing),
+                    (_, _) => return Err(crate::Error::Protocol("Never got FEDAUTHINFO token.".into())),
+                },
+                Some(ReceivedToken::FedAuthInfo(token)) => return Ok(token),
+                Some(ReceivedToken::EnvChange(TokenEnvChange::Routing { host, port })) => {
+                    routing = Some(Error::Routing { host, port });
+                }
+                Some(_) => (),
+                None => match last_error {
+                    Some(err) => return Err(crate::Error::Server(err)),
+                    None => return Err(crate::Error::Protocol("Never got FEDAUTHINFO token.".into())),
+                },
+            }
+        }
+    }
+
     async fn get_col_metadata(&mut self) -> crate::Result<ReceivedToken> {
         let meta = Arc::new(TokenColMetaData::decode(self.conn).await?);
         self.conn.context_mut().set_last_meta(meta.clone());
@@ -104,6 +143,12 @@ where
         event!(Level::TRACE, ?meta);
 
         Ok(ReceivedToken::NewResultset(meta))
+    }
+
+    async fn get_fed_auth_info(&mut self) -> crate::Result<ReceivedToken> {
+        let fed_auth_info = TokenFedAuthInfo::decode_async(self.conn).await?;
+        event!(Level::TRACE, "FedAuthInfo response");
+        Ok(ReceivedToken::FedAuthInfo(fed_auth_info))
     }
 
     async fn get_row(&mut self) -> crate::Result<ReceivedToken> {
@@ -247,6 +292,7 @@ where
                 TokenType::LoginAck => this.get_login_ack().await?,
                 TokenType::Sspi => this.get_sspi().await?,
                 TokenType::FeatureExtAck => this.get_feature_ext_ack().await?,
+                TokenType::FedAuthInfo => this.get_fed_auth_info().await?,
                 _ => panic!("Token {:?} unimplemented!", ty),
             };
 
