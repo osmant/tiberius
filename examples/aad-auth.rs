@@ -9,10 +9,10 @@
 //!   - TENANT_ID: tenant id of service principal and sql instance;
 //!   - SERVER: SQL server URI
 use oauth2::{basic::BasicClient, AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl};
-use tokio_util::compat::TokioAsyncWriteCompatExt;
 use std::env;
 use tiberius::{AuthMethod, Client, Config, Query};
 use tokio::net::TcpStream;
+use tokio_util::compat::TokioAsyncWriteCompatExt;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -26,15 +26,19 @@ async fn main() -> anyhow::Result<()> {
 
     let client = BasicClient::new(client_id)
         .set_client_secret(client_secret)
-        .set_auth_uri(AuthUrl::new(format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize"))?)
-        .set_token_uri(TokenUrl::new(format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"))?);
+        .set_auth_uri(AuthUrl::new(format!(
+            "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/authorize"
+        ))?)
+        .set_token_uri(TokenUrl::new(format!(
+            "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+        ))?);
 
     let http_client = reqwest::blocking::ClientBuilder::new()
         // Following redirects opens the client up to SSRF vulnerabilities.
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("Client should build");
-    
+
     let token_result = client
         .exchange_client_credentials()
         .add_scope(Scope::new("read".to_string()))

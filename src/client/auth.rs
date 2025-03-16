@@ -46,19 +46,18 @@ impl Debug for WindowsAuth {
     }
 }
 
+#[cfg(feature = "aad")]
 #[derive(Clone, PartialEq, Eq)]
 pub struct AadAuth {
-    pub(crate) user: String
+    pub(crate) user: String,
 }
 
+#[cfg(feature = "aad")]
 impl Debug for AadAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AadAuth")
-            .field("user", &self.user)
-            .finish()
+        f.debug_struct("AadAuth").field("user", &self.user).finish()
     }
 }
-
 
 /// Defines the method of authentication to the server.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +83,7 @@ pub enum AuthMethod {
     /// Authenticate with an AAD token. The token should encode an AAD user/service principal
     /// which has access to SQL Server.
     AADToken(String),
+    #[cfg(feature = "aad")]
     /// Authenticate interactively with AAD. This is useful for CLI applications where the user
     /// can be prompted for credentials via a browser.
     AADInteractive(AadAuth),
@@ -121,10 +121,11 @@ impl AuthMethod {
         Self::AADToken(token.to_string())
     }
 
+    #[cfg(feature = "aad")]
     /// Construct a new configuration with AAD interactive auth.
     pub fn aad_interactive(user: impl ToString) -> Self {
         Self::AADInteractive(AadAuth {
-            user: user.to_string()
+            user: user.to_string(),
         })
     }
 }

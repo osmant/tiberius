@@ -3,6 +3,7 @@ mod bulk_load;
 mod column_data;
 mod decode;
 mod encode;
+#[cfg(feature = "aad")]
 mod fed_auth_token;
 mod guid;
 mod header;
@@ -21,6 +22,7 @@ use bytes::BytesMut;
 pub use column_data::*;
 pub use decode::*;
 pub(crate) use encode::*;
+#[cfg(feature = "aad")]
 pub use fed_auth_token::*;
 use futures_util::stream::{Stream, TryStreamExt};
 pub use header::*;

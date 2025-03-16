@@ -315,20 +315,23 @@ pub(crate) trait ConfigString {
                 Ok(AuthMethod::Integrated)
             }
             _ => {
+                #[cfg(feature = "aad")]
                 match self.dict().get("authentication") {
-                    Some(auth) => {
-                        match auth.to_lowercase().as_str() {
-                            "aadinteractive" | "activedirectoryinteractive" | "active directory interactive" => {
-                                match user {
-                                    Some(user) => Ok(AuthMethod::aad_interactive(user)),
-                                    None => Err(crate::Error::Conversion("Connection string: Missing user for AAD interactive".into())),
-                                }
-                            },
-                            _ => unimplemented!("Authentication method not supported!")
-                        }
+                    Some(auth) => match auth.to_lowercase().as_str() {
+                        "aadinteractive"
+                        | "activedirectoryinteractive"
+                        | "active directory interactive" => match user {
+                            Some(user) => Ok(AuthMethod::aad_interactive(user)),
+                            None => Err(crate::Error::Conversion(
+                                "Connection string: Missing user for AAD interactive".into(),
+                            )),
+                        },
+                        _ => unimplemented!("Authentication method not supported!"),
                     },
                     _ => Ok(AuthMethod::sql_server(user.unwrap_or(""), pw.unwrap_or(""))),
                 }
+                #[cfg(not(feature = "aad"))]
+                Ok(AuthMethod::sql_server(user.unwrap_or(""), pw.unwrap_or("")))
             }
         }
     }

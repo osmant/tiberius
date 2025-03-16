@@ -1,3 +1,5 @@
+#![allow(clippy::manual_unwrap_or_default)]
+
 extern crate proc_macro;
 use darling::FromMeta;
 

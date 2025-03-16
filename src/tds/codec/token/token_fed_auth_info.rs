@@ -1,7 +1,7 @@
-use std::{io::Cursor, mem};
 use crate::{error::Error, sql_read_bytes::SqlReadBytes, tds::codec::FromUtf16BytesLe};
-use byteorder::{ReadBytesExt, LittleEndian};
+use byteorder::{LittleEndian, ReadBytesExt};
 use futures_util::AsyncReadExt;
+use std::{io::Cursor, mem};
 
 // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-tds/0e4486d6-d407-4962-9803-0c1a4d4d87ce
 const FED_AUTH_INFOID_STSURL: u8 = 0x01;
@@ -12,7 +12,7 @@ const FED_AUTH_INFOID_SPN: u8 = 0x02;
 #[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct TokenFedAuthInfo {
     sts_url: String,
-    spn: String
+    spn: String,
 }
 
 impl TokenFedAuthInfo {
@@ -46,7 +46,7 @@ impl TokenFedAuthInfo {
             let info_id = option_cursor.read_u8()?;
             let info_data_len = option_cursor.read_u32::<LittleEndian>()? as usize;
             let info_data_offset = option_cursor.read_u32::<LittleEndian>()? as usize - 4; // from optionCount
-            let data_bytes = &bytes[info_data_offset..info_data_offset+info_data_len];
+            let data_bytes = &bytes[info_data_offset..info_data_offset + info_data_len];
             let data = String::from_utf16_bytes_le(data_bytes)?;
             match info_id {
                 FED_AUTH_INFOID_STSURL => sts_url = Some(data),
@@ -56,8 +56,8 @@ impl TokenFedAuthInfo {
         }
 
         match (sts_url, spn) {
-            (Some(sts_url), Some(spn)) => Ok(Self {sts_url, spn}),
-            _ => Err(Error::Protocol("Failed to read FedAuthInfo".into()))
+            (Some(sts_url), Some(spn)) => Ok(Self { sts_url, spn }),
+            _ => Err(Error::Protocol("Failed to read FedAuthInfo".into())),
         }
     }
 }
@@ -65,8 +65,8 @@ impl TokenFedAuthInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::{BytesMut, BufMut};
     use crate::{sql_read_bytes::test_utils::IntoSqlReadBytes, tds::codec::ToUtf16BytesLe};
+    use bytes::{BufMut, BytesMut};
 
     #[tokio::test]
     async fn decode_token_fed_auth_info() {
@@ -79,7 +79,8 @@ mod tests {
 
         let option_count = 2;
         let total_option_size = option_count * 9;
-        let token_length = 4 + total_option_size + spn_bytes.len() as u32 + sts_url_bytes.len() as u32;
+        let token_length =
+            4 + total_option_size + spn_bytes.len() as u32 + sts_url_bytes.len() as u32;
         fed_auth_info_bytes.put_u32_le(token_length);
         fed_auth_info_bytes.put_u32_le(option_count);
 
@@ -101,14 +102,15 @@ mod tests {
         // option 2 data
         fed_auth_info_bytes.put(spn_bytes.as_ref());
 
-        let fed_auth_info = 
+        let fed_auth_info =
             TokenFedAuthInfo::decode_async(&mut fed_auth_info_bytes.into_sql_read_bytes()).await;
 
-        assert_eq!(Ok(
-            TokenFedAuthInfo {
+        assert_eq!(
+            Ok(TokenFedAuthInfo {
                 spn: String::from("https://database.windows.net"),
                 sts_url: String::from("https://login.microsoft.com/tenant")
-            }
-        ), fed_auth_info)
+            }),
+            fed_auth_info
+        )
     }
 }

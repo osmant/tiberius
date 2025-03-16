@@ -1,10 +1,9 @@
 use std::env;
 
 use once_cell::sync::Lazy;
-use tiberius::{Client, Config, error::Error};
+use tiberius::{error::Error, Client, Config};
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
-
 
 static CONN_STR: Lazy<String> = Lazy::new(|| {
     env::var("TIBERIUS_TEST_CONNECTION_STRING").unwrap_or_else(|_| {
@@ -16,7 +15,7 @@ static CONN_STR: Lazy<String> = Lazy::new(|| {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut config = Config::from_ado_string(&CONN_STR)?;
-    
+
     // Connect with handling for routing responses
     let mut client = connect_with_routing(&mut config).await?;
 
@@ -29,7 +28,9 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn connect_with_routing(config: &mut Config) -> anyhow::Result<Client<tokio_util::compat::Compat<TcpStream>>> {
+async fn connect_with_routing(
+    config: &mut Config,
+) -> anyhow::Result<Client<tokio_util::compat::Compat<TcpStream>>> {
     loop {
         let tcp = TcpStream::connect(config.get_addr()).await?;
         tcp.set_nodelay(true)?;
@@ -43,7 +44,7 @@ async fn connect_with_routing(config: &mut Config) -> anyhow::Result<Client<toki
                 config.port(port);
                 // Try again with the new host/port
                 continue;
-            },
+            }
             Err(e) => return Err(e.into()),
         }
     }

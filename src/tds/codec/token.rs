@@ -10,6 +10,8 @@ mod token_return_value;
 mod token_row;
 mod token_sspi;
 mod token_type;
+
+#[cfg(feature = "aad")]
 mod token_fed_auth_info;
 
 pub use token_col_metadata::*;
@@ -24,4 +26,6 @@ pub use token_return_value::*;
 pub use token_row::*;
 pub use token_sspi::*;
 pub use token_type::*;
+
+#[cfg(feature = "aad")]
 pub use token_fed_auth_info::*;

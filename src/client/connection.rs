@@ -4,12 +4,14 @@
     feature = "vendored-openssl"
 ))]
 use crate::client::{tls::TlsPreloginWrapper, tls_stream::create_tls_stream};
+#[cfg(feature = "aad")]
+use crate::tds::codec::TokenFedAuthInfo;
 use crate::{
     client::{tls::MaybeTlsStream, AuthMethod, Config},
     tds::{
         codec::{
             self, Encode, LoginMessage, Packet, PacketCodec, PacketHeader, PacketStatus,
-            PreloginMessage, TokenDone, TokenFedAuthInfo,
+            PreloginMessage, TokenDone,
         },
         stream::TokenStream,
         Context, HEADER_BYTES,
@@ -88,10 +90,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             buf: BytesMut::new(),
         };
 
-        let fed_auth_required = matches!(config.auth, 
-            AuthMethod::AADToken(_)
-            | AuthMethod::AADInteractive(_)
+        #[cfg(feature = "aad")]
+        let fed_auth_required = matches!(
+            config.auth,
+            AuthMethod::AADToken(_) | AuthMethod::AADInteractive(_)
         );
+
+        #[cfg(not(feature = "aad"))]
+        let fed_auth_required = matches!(config.auth, AuthMethod::AADToken(_));
 
         let prelogin = connection
             .prelogin(config.encryption, fed_auth_required)
@@ -129,6 +135,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         TokenStream::new(self).flush_sspi().await
     }
 
+    #[cfg(feature = "aad")]
     /// Flush the incoming token stream until receiving `FEDAUTHINFO` token.
     async fn flush_fed_auth_info(&mut self) -> crate::Result<TokenFedAuthInfo> {
         TokenStream::new(self).flush_fed_auth_info().await
@@ -437,6 +444,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                 self.send(PacketHeader::login(id), login_message).await?;
                 self = self.post_login_encryption(encryption);
             }
+            #[cfg(feature = "aad")]
             AuthMethod::AADInteractive(auth) => {
                 login_message.aad_interactive(prelogin.fed_auth_required);
                 let id = self.context.next_packet_id();
@@ -446,9 +454,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                 // federated authentication
                 let fed_auth_info = self.flush_fed_auth_info().await?;
                 dbg!(&fed_auth_info);
-                self.authenticate_aad_interactive(&auth, &fed_auth_info).await?;
+                self.authenticate_aad_interactive(&auth, &fed_auth_info)
+                    .await?;
                 self = self.post_login_encryption(encryption);
-            },
+            }
         }
 
         Ok(self)
@@ -596,7 +605,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> SqlReadBytes for Connection<S> {
     }
 }
 
-#[cfg(feature = "aad-interactive-auth")]
+#[cfg(feature = "aad")]
 mod aad {
     use std::borrow::Cow;
     use std::error::Error;
@@ -604,7 +613,11 @@ mod aad {
 
     use futures_util::{AsyncRead, AsyncWrite};
 
-    use crate::{client::AadAuth, tds::codec::{TokenFedAuthInfo, FedAuthToken, PacketHeader}, Error as TdsError};
+    use crate::{
+        client::AadAuth,
+        tds::codec::{FedAuthToken, PacketHeader, TokenFedAuthInfo},
+        Error as TdsError,
+    };
 
     use super::Connection;
 
@@ -613,62 +626,74 @@ mod aad {
     const AAD_PUBLIC_CLIENT_ID: &str = "2fd908ad-0664-4344-b9be-cd3e8b574c38";
     const DEFAULT_HOST: &str = "localhost";
     const DEFAULT_PORT: u16 = 50968;
-    
+
     impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
-         /// Authenticate with Azure Active Directory using an interactive flow
-        pub(super) async fn authenticate_aad_interactive(&mut self, auth: &AadAuth, fed_auth_info: &TokenFedAuthInfo) 
-        -> crate::Result<()> 
-        {
+        /// Authenticate with Azure Active Directory using an interactive flow
+        pub(super) async fn authenticate_aad_interactive(
+            &mut self,
+            auth: &AadAuth,
+            fed_auth_info: &TokenFedAuthInfo,
+        ) -> crate::Result<()> {
             let (sts_url, spn) = (fed_auth_info.sts_url(), fed_auth_info.spn());
             dbg!(sts_url, spn);
 
-            let separator_index = 
-                sts_url.len() 
-                    - 1 
-                    - sts_url
-                        .bytes()
-                        .rev()
-                        .position(|b| b == b'/')
-                        .ok_or(TdsError::Protocol(
-                            "Received an invalid sts_url in federated authentication info".into()
-                        ))?;
+            let separator_index = sts_url.len()
+                - 1
+                - sts_url
+                    .bytes()
+                    .rev()
+                    .position(|b| b == b'/')
+                    .ok_or(TdsError::Protocol(
+                        "Received an invalid sts_url in federated authentication info".into(),
+                    ))?;
             let authority = &sts_url[..separator_index];
             let audience = &sts_url[separator_index + 1..];
             dbg!(&authority, &audience);
 
             let scope = Self::get_scope(spn);
             dbg!(&scope);
-            
+
             // Get access token through interactive authentication
-            match self.perform_interactive_auth(audience, &auth.user, &scope).await {
+            match self
+                .perform_interactive_auth(audience, &auth.user, &scope)
+                .await
+            {
                 Ok(token) => {
                     // Send the token to the server
                     self.send_fed_auth_token(token).await
-                },
-                Err(e) => {
-                    Err(TdsError::Protocol(format!("Failed to perform interactive authentication: {}", e).into()))
                 }
+                Err(e) => Err(TdsError::Protocol(
+                    format!("Failed to perform interactive authentication: {}", e).into(),
+                )),
             }
         }
 
-        #[cfg(feature = "aad-interactive-auth")]
+        #[cfg(feature = "aad")]
         /// Performs interactive OAuth2 authentication with Azure AD using the PKCE flow
-        async fn perform_interactive_auth(&self, tenant_id: &str, username: &str, scope: &str) 
-            -> Result<String, Box<dyn Error + Send + Sync>> 
-        {
-            use oauth2::{AuthType, AuthUrl, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope, TokenUrl};
+        async fn perform_interactive_auth(
+            &self,
+            tenant_id: &str,
+            username: &str,
+            scope: &str,
+        ) -> Result<String, Box<dyn Error + Send + Sync>> {
             use oauth2::basic::BasicClient;
+            use oauth2::{
+                AuthType, AuthUrl, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope,
+                TokenUrl,
+            };
             use oauth2::{AuthorizationCode, TokenResponse};
             use reqwest::{redirect, ClientBuilder};
+            use std::net::{IpAddr, Ipv4Addr, SocketAddr};
             use tokio::net::TcpListener;
             use tokio::sync::Mutex;
             use tokio::time::{Duration, Instant};
             use url::Url;
             use uuid::Uuid;
-            use std::net::{SocketAddr, IpAddr, Ipv4Addr};
-            
+
             // Find an available port and create the server
-            let port = Self::find_available_port().await.ok_or("Could not find an available port")?;
+            let port = Self::find_available_port()
+                .await
+                .ok_or("Could not find an available port")?;
             let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
             let listener = TcpListener::bind(addr).await?;
             let redirect_url = format!("http://{}:{}", DEFAULT_HOST, port);
@@ -688,7 +713,7 @@ mod aad {
                 .set_redirect_uri(RedirectUrl::new(redirect_url)?);
 
             let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-            
+
             let state = CsrfToken::new(Uuid::new_v4().to_string());
             let csrf_state_str = state.secret().clone();
 
@@ -710,20 +735,20 @@ mod aad {
                 .url();
 
             tracing::info!("Opening browser to: {}", auth_url);
-            
+
             // Open the browser with the authorization URL
             if let Err(e) = webbrowser::open(auth_url.as_str()) {
                 tracing::warn!("Failed to open web browser: {}", e);
                 tracing::warn!("Please manually navigate to: {}", auth_url);
             }
-            
+
             // Create shared state for the authorization code
             let auth_code = Arc::new(Mutex::new(None));
-            
+
             // Accept connections in a loop with timeout
             let timeout_duration = Duration::from_secs(120);
             let start_time = Instant::now();
-            
+
             // Create a reqwest client without following redirects
             let http_client = ClientBuilder::new()
                 .redirect(redirect::Policy::none())
@@ -735,10 +760,10 @@ mod aad {
                     Ok((stream, _)) => {
                         let auth_code_clone = Arc::clone(&auth_code);
                         let csrf_state = csrf_state_str.clone();
-                        
+
                         tokio::spawn(async move {
                             use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                            
+
                             let mut socket = stream;
                             let mut buffer = [0; 4096];
                             let n = match socket.read(&mut buffer).await {
@@ -748,43 +773,46 @@ mod aad {
                                     return;
                                 }
                             };
-                            
+
                             let data = String::from_utf8_lossy(&buffer[..n]);
-                            
+
                             // Extract request line
                             let request_line = match data.lines().next() {
                                 Some(line) => line,
                                 None => return,
                             };
-                            
+
                             // Extract the path with query parameters
                             let path = match request_line.split_whitespace().nth(1) {
                                 Some(path) => path,
                                 None => return,
                             };
-                            
+
                             // Parse the query parameters
                             let query_string = match path.split('?').nth(1) {
                                 Some(query) => query,
                                 None => return,
                             };
-                            
+
                             // Parse the query string
-                            let parsed_url = match Url::parse(&format!("http://localhost/?{}", query_string)) {
-                                Ok(url) => url,
-                                Err(_) => return,
-                            };
-                            
+                            let parsed_url =
+                                match Url::parse(&format!("http://localhost/?{}", query_string)) {
+                                    Ok(url) => url,
+                                    Err(_) => return,
+                                };
+
                             let pairs: Vec<_> = parsed_url.query_pairs().collect();
-                            
-                            let code = pairs.iter()
+
+                            let code = pairs
+                                .iter()
                                 .find(|(k, _)| k == "code")
                                 .map(|(_, v)| v.to_string());
-                            
-                            let state = pairs.iter()
+
+                            let state = pairs
+                                .iter()
                                 .find(|(k, _)| k == "state")
                                 .map(|(_, v)| v.to_string());
-                            
+
                             // Verify the state parameter to prevent CSRF attacks
                             if let Some(received_state) = state {
                                 if received_state != csrf_state {
@@ -796,11 +824,11 @@ mod aad {
                                     return;
                                 }
                             }
-                            
+
                             if let Some(code_value) = code {
                                 // Store the authorization code
                                 *auth_code_clone.lock().await = Some(code_value);
-                                
+
                                 // Send a successful response to the browser
                                 let response = "HTTP/1.1 200 OK\r\n\
                                                Content-Type: text/html\r\n\
@@ -818,75 +846,63 @@ mod aad {
                     }
                     Err(e) => tracing::error!("Failed to accept connection: {}", e),
                 }
-                
+
                 // A short sleep to avoid CPU spinning
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            
+
             // Check if we timed out
             if start_time.elapsed() >= timeout_duration {
                 return Err("Authentication timed out after 120 seconds".into());
             }
-            
+
             // Get the authorization code
-            let code = auth_code.lock().await.clone()
+            let code = auth_code
+                .lock()
+                .await
+                .clone()
                 .ok_or("No authorization code received")?;
-            
+
             tracing::info!("Received authorization code");
-            
+
             let token_result = client
                 .exchange_code(AuthorizationCode::new(code))
                 .set_pkce_verifier(pkce_verifier)
                 .request_async(&http_client)
                 .await?;
-                
+
             Ok(token_result.access_token().secret().to_string())
-        }
-
-        #[cfg(not(feature = "aad-interactive-auth"))]
-        /// Fallback implementation when aad-interactive-auth feature is not enabled
-        async fn perform_interactive_auth(&self, _authority: &str, _username: &str, _scope: &str) 
-            -> Result<String, Box<dyn Error + Send + Sync>> 
-        {
-            Err("AAD Interactive authentication requires the 'aad-interactive-auth' feature to be enabled.
-Add the following to your Cargo.toml:
-
-[dependencies]
-tiberius = { version = \"0.12.3\", features = [\"aad-interactive-auth\"] }
-
-Or, enable the feature in your dependency:
-
-[dependencies.tiberius]
-version = \"0.12.3\"
-features = [\"aad-interactive-auth\"]".into())
         }
 
         /// Constructs and sends the FEDAUTH token (0x08) with the provided access token.
         #[inline]
-        async fn send_fed_auth_token(&mut self, access_token: impl AsRef<str>) -> crate::Result<()> {
+        async fn send_fed_auth_token(
+            &mut self,
+            access_token: impl AsRef<str>,
+        ) -> crate::Result<()> {
             let fed_auth_token_message = FedAuthToken::new(access_token.as_ref());
             let id = self.context.next_packet_id();
-            self.send(PacketHeader::fed_auth_token(id), fed_auth_token_message).await?;
+            self.send(PacketHeader::fed_auth_token(id), fed_auth_token_message)
+                .await?;
             Ok(())
         }
 
         /// Constructs a scope with suffix `/.default`.
         #[inline]
         fn get_scope(spn: &str) -> Cow<'_, str> {
-            if spn.ends_with(DEFAULT_SCOPE_SUFFIX) { 
+            if spn.ends_with(DEFAULT_SCOPE_SUFFIX) {
                 spn.into()
-            } 
-            else {
+            } else {
                 format!("{}{DEFAULT_SCOPE_SUFFIX}", spn.trim_end_matches('/')).into()
             }
         }
 
         /// Helper function to find an available port for the local server
-        #[cfg(feature = "aad-interactive-auth")]
+        #[cfg(feature = "aad")]
         async fn find_available_port() -> Option<u16> {
+            use std::net::{IpAddr, Ipv4Addr, SocketAddr};
             use tokio::net::TcpListener;
-            use std::net::{SocketAddr, IpAddr, Ipv4Addr};
-            
+
             let mut port = DEFAULT_PORT;
             while port < u16::MAX {
                 let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);

@@ -1,20 +1,18 @@
+use super::{Encode, ToUtf16BytesLe};
+use byteorder::{LittleEndian, WriteBytesExt};
+use bytes::BytesMut;
 use std::io::{Cursor, Write};
 use std::mem;
-use byteorder::{WriteBytesExt, LittleEndian};
-use bytes::BytesMut;
-use super::{Encode, ToUtf16BytesLe};
 
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct FedAuthToken<'a> {
-    access_token: &'a str
+    access_token: &'a str,
 }
 
 impl<'a> FedAuthToken<'a> {
     pub fn new(access_token: &'a str) -> Self {
-        Self {
-            access_token
-        }
+        Self { access_token }
     }
 }
 
@@ -35,14 +33,14 @@ impl<'a> Encode<BytesMut> for FedAuthToken<'a> {
 
 #[cfg(test)]
 mod tests {
-    use bytes::{BytesMut, Buf};
-    use crate::tds::codec::{Encode, FromUtf16BytesLe};
     use super::FedAuthToken;
+    use crate::tds::codec::{Encode, FromUtf16BytesLe};
+    use bytes::{Buf, BytesMut};
 
     #[test]
     fn encode_fed_auth_token() {
         let fed_auth_token = FedAuthToken {
-            access_token: "testtoken"
+            access_token: "testtoken",
         };
 
         let mut bytes = BytesMut::new();
