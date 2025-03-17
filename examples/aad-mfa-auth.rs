@@ -21,8 +21,21 @@ async fn main() -> anyhow::Result<()> {
 
     let stream = client.query("SELECT @P1", &[&1i32]).await?;
     let row = stream.into_row().await?.unwrap();
+    println!("{:?}", row);
+
+    let mut client = connect_with_routing(&mut config).await?;
+    let stream = client.query("SELECT @P1", &[&1i32]).await?;
+    let row = stream.into_row().await?.unwrap();
 
     println!("{:?}", row);
+    drop(client);
+
+    let mut client = connect_with_routing(&mut config).await?;
+    let stream = client.query("SELECT @P1", &[&1i32]).await?;
+    let row = stream.into_row().await?.unwrap();
+
+    println!("{:?}", row);
+
     assert_eq!(Some(1), row.get(0));
 
     Ok(())

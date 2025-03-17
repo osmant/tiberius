@@ -150,6 +150,7 @@ struct FedAuthExt<'a> {
 #[cfg(feature = "aad")]
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
+#[allow(dead_code)]
 enum MSALWorkflow {
     ActiveDirectoryInteractive,
     ActiveDirectoryPassword,

@@ -610,19 +610,20 @@ mod aad {
     use std::borrow::Cow;
     use std::error::Error;
     use std::sync::Arc;
-
+    use std::time::Duration;
     use futures_util::{AsyncRead, AsyncWrite};
-
+    use oauth2::{
+        basic::BasicClient, AuthType, AuthUrl, ClientId,
+        RefreshToken, Scope, TokenResponse, TokenUrl,
+    };
     use crate::{
-        client::AadAuth,
+        client::{AadAuth, auth::token_cache::{TOKEN_CACHE, TokenCacheEntry}},
         tds::codec::{FedAuthToken, PacketHeader, TokenFedAuthInfo},
         Error as TdsError,
     };
-
     use super::Connection;
 
     const DEFAULT_SCOPE_SUFFIX: &str = "/.default";
-    // Microsoft Entra ID client ID for public clients accessing Azure SQL
     const AAD_PUBLIC_CLIENT_ID: &str = "2fd908ad-0664-4344-b9be-cd3e8b574c38";
     const DEFAULT_HOST: &str = "localhost";
     const DEFAULT_PORT: u16 = 50968;
@@ -635,7 +636,6 @@ mod aad {
             fed_auth_info: &TokenFedAuthInfo,
         ) -> crate::Result<()> {
             let (sts_url, spn) = (fed_auth_info.sts_url(), fed_auth_info.spn());
-            dbg!(sts_url, spn);
 
             let separator_index = sts_url.len()
                 - 1
@@ -646,21 +646,66 @@ mod aad {
                     .ok_or(TdsError::Protocol(
                         "Received an invalid sts_url in federated authentication info".into(),
                     ))?;
-            let authority = &sts_url[..separator_index];
-            let audience = &sts_url[separator_index + 1..];
-            dbg!(&authority, &audience);
 
+            let tenant_id = &sts_url[separator_index + 1..];
             let scope = Self::get_scope(spn);
-            dbg!(&scope);
 
-            // Get access token through interactive authentication
-            match self
-                .perform_interactive_auth(audience, &auth.user, &scope)
-                .await
-            {
-                Ok(token) => {
-                    // Send the token to the server
-                    self.send_fed_auth_token(token).await
+            // If token caching is enabled, try to get a valid token from cache
+            if auth.token_cache_enabled {
+                if let Some(cached_token) = TOKEN_CACHE.get_valid_token(tenant_id, &auth.user, spn) {
+                    return self.send_fed_auth_token(&cached_token.access_token).await;
+                }
+
+                // Try to refresh an expired token
+                if let Some(cached_token) = TOKEN_CACHE.get_token_for_refresh(tenant_id, &auth.user, spn) {
+                    if let Some(refresh_token) = &cached_token.refresh_token {
+                        match self.refresh_token(tenant_id, refresh_token, &scope).await {
+                            Ok((access_token, refresh_token, expires_in)) => {
+                                // Store the new token in cache
+                                let entry = TokenCacheEntry::new(
+                                    access_token.clone(),
+                                    Some(refresh_token),
+                                    expires_in,
+                                    auth.user.clone(),
+                                    tenant_id.to_string(),
+                                    spn.to_string(),
+                                );
+                                if let Err(e) = TOKEN_CACHE.store_token(entry) {
+                                    tracing::warn!("Failed to store token in cache: {}", e);
+                                }
+                                return self.send_fed_auth_token(&access_token).await;
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to refresh token: {}", e);
+                                // Remove the invalid token from cache
+                                if let Err(e) = TOKEN_CACHE.remove_token(tenant_id, &auth.user, spn) {
+                                    tracing::warn!("Failed to remove invalid token from cache: {}", e);
+                                }
+                                // Continue with interactive auth
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Fall back to interactive authentication
+            match self.perform_interactive_auth(tenant_id, &auth.user, &scope).await {
+                Ok((access_token, refresh_token, expires_in)) => {
+                    // Store the token in cache if enabled
+                    if auth.token_cache_enabled {
+                        let entry = TokenCacheEntry::new(
+                            access_token.clone(),
+                            Some(refresh_token),
+                            expires_in,
+                            auth.user.clone(),
+                            tenant_id.to_string(),
+                            spn.to_string(),
+                        );
+                        if let Err(e) = TOKEN_CACHE.store_token(entry) {
+                            tracing::warn!("Failed to store token in cache: {}", e);
+                        }
+                    }
+                    self.send_fed_auth_token(&access_token).await
                 }
                 Err(e) => Err(TdsError::Protocol(
                     format!("Failed to perform interactive authentication: {}", e).into(),
@@ -668,14 +713,56 @@ mod aad {
             }
         }
 
-        #[cfg(feature = "aad")]
+        /// Refreshes an expired token using the refresh token
+        async fn refresh_token(
+            &self,
+            tenant_id: &str,
+            refresh_token: &str,
+            scope: &str,
+        ) -> Result<(String, String, Duration), Box<dyn Error + Send + Sync>> {
+            let client = BasicClient::new(ClientId::new(AAD_PUBLIC_CLIENT_ID.to_string()))
+                .set_auth_uri(AuthUrl::new(format!(
+                    "https://login.microsoftonline.com/{}/oauth2/v2.0/authorize",
+                    tenant_id
+                ))?)
+                .set_token_uri(TokenUrl::new(format!(
+                    "https://login.microsoftonline.com/{}/oauth2/v2.0/token",
+                    tenant_id
+                ))?)
+                .set_auth_type(AuthType::RequestBody);
+
+            let http_client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?;
+
+            let token_result = client
+                .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
+                .add_scope(Scope::new(scope.to_string()))
+                .add_scope(Scope::new("openid".to_string()))
+                .add_scope(Scope::new("profile".to_string()))
+                .add_scope(Scope::new("offline_access".to_string()))
+                .request_async(&http_client)
+                .await?;
+
+            Ok((
+                token_result.access_token().secret().to_string(),
+                token_result
+                    .refresh_token()
+                    .ok_or("No refresh token in response")?
+                    .secret()
+                    .to_string(),
+                token_result.expires_in().unwrap_or(Duration::from_secs(3600)),
+            ))
+        }
+
         /// Performs interactive OAuth2 authentication with Azure AD using the PKCE flow
+        #[cfg(feature = "aad")]
         async fn perform_interactive_auth(
             &self,
             tenant_id: &str,
             username: &str,
             scope: &str,
-        ) -> Result<String, Box<dyn Error + Send + Sync>> {
+        ) -> Result<(String, String, Duration), Box<dyn Error + Send + Sync>> {
             use oauth2::basic::BasicClient;
             use oauth2::{
                 AuthType, AuthUrl, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope,
@@ -871,7 +958,15 @@ mod aad {
                 .request_async(&http_client)
                 .await?;
 
-            Ok(token_result.access_token().secret().to_string())
+            Ok((
+                token_result.access_token().secret().to_string(),
+                token_result
+                    .refresh_token()
+                    .ok_or("No refresh token in response")?
+                    .secret()
+                    .to_string(),
+                token_result.expires_in().unwrap_or(Duration::from_secs(3600)),
+            ))
         }
 
         /// Constructs and sends the FEDAUTH token (0x08) with the provided access token.
@@ -897,19 +992,14 @@ mod aad {
             }
         }
 
-        /// Helper function to find an available port for the local server
-        #[cfg(feature = "aad")]
+        /// Find an available port for the local server
         async fn find_available_port() -> Option<u16> {
-            use std::net::{IpAddr, Ipv4Addr, SocketAddr};
             use tokio::net::TcpListener;
-
-            let mut port = DEFAULT_PORT;
-            while port < u16::MAX {
-                let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-                if TcpListener::bind(addr).await.is_ok() {
+            // Try a few different ports starting from the default
+            for port in DEFAULT_PORT..DEFAULT_PORT + 10 {
+                if TcpListener::bind(("127.0.0.1", port)).await.is_ok() {
                     return Some(port);
                 }
-                port += 1;
             }
             None
         }

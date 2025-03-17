@@ -19,7 +19,7 @@
 //!     config.port(1433);
 //!
 //!     // Using SQL Server authentication.
-//!     config.authentication(AuthMethod::sql_server("SA", "<YourStrong@Passw0rd>"));
+//!     config.set_authentication(AuthMethod::sql_server("SA", "<YourStrong@Passw0rd>"));
 //!
 //!     // on production, it is not a good idea to do this
 //!     config.trust_cert();
@@ -74,7 +74,7 @@
 //!
 //!     config.host("localhost");
 //!     config.port(1433);
-//!     config.authentication(AuthMethod::sql_server("SA", "<YourStrong@Passw0rd>"));
+//!     config.set_authentication(AuthMethod::sql_server("SA", "<YourStrong@Passw0rd>"));
 //!     config.trust_cert(); // on production, it is not a good idea to do this
 //!
 //!     let tcp = TcpStream::connect(config.get_addr()).await?;
@@ -110,7 +110,7 @@
 //! # let mut config = Config::new();
 //! # config.host("localhost");
 //! # config.port(1433);
-//! # config.authentication(AuthMethod::sql_server("SA", "<YourStrong@Passw0rd>"));
+//! # config.set_authentication(AuthMethod::sql_server("SA", "<YourStrong@Passw0rd>"));
 //! # config.trust_cert();
 //! # let tcp = TcpStream::connect(config.get_addr()).await?;
 //! # tcp.set_nodelay(true)?;
@@ -134,7 +134,7 @@
 //! # let mut config = Config::new();
 //! # config.host("localhost");
 //! # config.port(1433);
-//! # config.authentication(AuthMethod::sql_server("SA", "<YourStrong@Passw0rd>"));
+//! # config.set_authentication(AuthMethod::sql_server("SA", "<YourStrong@Passw0rd>"));
 //! # config.trust_cert();
 //! # let tcp = TcpStream::connect(config.get_addr()).await?;
 //! # tcp.set_nodelay(true)?;
@@ -199,7 +199,7 @@
 //! async fn main() -> anyhow::Result<()> {
 //!     let mut config = Config::new();
 //!
-//!     config.authentication(AuthMethod::sql_server("SA", "<password>"));
+//!     config.set_authentication(AuthMethod::sql_server("SA", "<password>"));
 //!     config.host("localhost");
 //!
 //!     // The default port of SQL Browser

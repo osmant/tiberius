@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::AuthMethod;
+#[cfg(feature = "aad")]
+use super::auth::token_cache::TOKEN_CACHE;
 use crate::EncryptionLevel;
 use ado_net::*;
 use jdbc::*;
@@ -160,15 +162,48 @@ impl Config {
     /// Sets the authentication method.
     ///
     /// - Defaults to `None`.
-    pub fn authentication(&mut self, auth: AuthMethod) {
+    pub fn set_authentication(&mut self, auth: AuthMethod) {
         self.auth = auth;
+    }
+
+    /// Gets the current authentication method.
+    pub fn authentication(&self) -> &AuthMethod {
+        &self.auth
     }
 
     /// Sets ApplicationIntent readonly.
     ///
     /// - Defaults to `false`.
-    pub fn readonly(&mut self, readnoly: bool) {
-        self.readonly = readnoly;
+    pub fn readonly(&mut self, readonly: bool) {
+        self.readonly = readonly;
+    }
+
+    /// Enable or disable token caching for AAD authentication.
+    ///
+    /// Token caching will store access tokens and refresh tokens after a successful
+    /// authentication, allowing subsequent connections to reuse them without
+    /// requiring interactive authentication.
+    ///
+    /// This option only applies when using the `AADInteractive` authentication method.
+    ///
+    /// - Defaults to `true` (enabled).
+    #[cfg(feature = "aad")]
+    pub fn enable_token_cache(&mut self, enabled: bool) -> &mut Self {
+        if let AuthMethod::AADInteractive(ref mut auth) = self.auth {
+            auth.token_cache_enabled = enabled;
+        }
+        self
+    }
+
+    /// Clear the token cache used by AAD authentication.
+    ///
+    /// This will remove all stored tokens, forcing the next authentication to
+    /// perform a full interactive flow.
+    ///
+    /// Returns `Ok(())` if the cache was cleared successfully, or an error if clearing failed.
+    #[cfg(feature = "aad")]
+    pub fn clear_token_cache() -> crate::Result<()> {
+        TOKEN_CACHE.clear()
     }
 
     pub(crate) fn get_host(&self) -> &str {
@@ -247,7 +282,7 @@ impl Config {
             builder.instance_name(instance);
         }
 
-        builder.authentication(s.authentication()?);
+        builder.set_authentication(s.authentication()?);
 
         if let Some(database) = s.database() {
             builder.database(database);
@@ -268,6 +303,13 @@ impl Config {
         builder.encryption(s.encrypt()?);
 
         builder.readonly(s.readonly());
+
+        // Parse the enableTokenCache option if present
+        #[cfg(feature = "aad")]
+        if let Some(enable_cache_str) = s.enable_token_cache() {
+            let enabled = AdoNetConfig::parse_bool(enable_cache_str)?;
+            builder.enable_token_cache(enabled);
+        }
 
         Ok(builder)
     }
@@ -364,6 +406,13 @@ pub(crate) trait ConfigString {
             .map(|ca| ca.to_string())
     }
 
+    #[cfg(feature = "aad")]
+    fn enable_token_cache(&self) -> Option<&str> {
+        self.dict()
+            .get("enabletokencache")
+            .map(|val| val.as_str())
+    }
+
     #[cfg(any(
         feature = "rustls",
         feature = "native-tls",
@@ -395,7 +444,8 @@ pub(crate) trait ConfigString {
             "true" | "yes" => Ok(true),
             "false" | "no" => Ok(false),
             _ => Err(crate::Error::Conversion(
-                "Connection string: Not a valid boolean".into(),
+                format!("Connection string: '{}' is not a valid boolean. Expected 'true', 'false', 'yes', or 'no'.",
+                v.as_ref()).into()
             )),
         }
     }

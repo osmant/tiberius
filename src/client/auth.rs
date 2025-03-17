@@ -1,9 +1,12 @@
 use std::fmt::Debug;
 
+#[cfg(feature = "aad")]
+pub mod token_cache;
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct SqlServerAuth {
-    user: String,
-    password: String,
+    pub(crate) user: String,
+    pub(crate) password: String,
 }
 
 impl SqlServerAuth {
@@ -50,12 +53,17 @@ impl Debug for WindowsAuth {
 #[derive(Clone, PartialEq, Eq)]
 pub struct AadAuth {
     pub(crate) user: String,
+    /// Whether token caching is enabled for this authentication
+    pub token_cache_enabled: bool,
 }
 
 #[cfg(feature = "aad")]
 impl Debug for AadAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AadAuth").field("user", &self.user).finish()
+        f.debug_struct("AadAuth")
+            .field("user", &self.user)
+            .field("token_cache_enabled", &self.token_cache_enabled)
+            .finish()
     }
 }
 
@@ -126,6 +134,75 @@ impl AuthMethod {
     pub fn aad_interactive(user: impl ToString) -> Self {
         Self::AADInteractive(AadAuth {
             user: user.to_string(),
+            token_cache_enabled: true, // Enable token caching by default
         })
+    }
+
+    #[cfg(feature = "aad")]
+    /// Construct a new configuration with AAD interactive auth with explicit cache control
+    pub fn aad_interactive_with_cache(user: impl ToString, enable_cache: bool) -> Self {
+        Self::AADInteractive(AadAuth {
+            user: user.to_string(),
+            token_cache_enabled: enable_cache,
+        })
+    }
+
+    /// Get the current auth configuration as an `AadAuth` if this is an AAD interactive auth method
+    #[cfg(feature = "aad")]
+    pub fn as_aad_auth(&self) -> Option<&AadAuth> {
+        match self {
+            Self::AADInteractive(auth) => Some(auth),
+            _ => None,
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    
+    #[tokio::test]
+    async fn test_token_cache_operations() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::client::token_cache::{TOKEN_CACHE, TokenCacheEntry};
+        use std::time::Duration;
+        
+        // Clear cache before test
+        TOKEN_CACHE.clear()?;
+
+        let test_token = TokenCacheEntry::new(
+            "test_access_token".to_string(),
+            Some("test_refresh_token".to_string()),
+            Duration::from_secs(3600),
+            "test_user".to_string(),
+            "test_tenant".to_string(),
+            "test_spn".to_string(),
+        );
+
+        // Store token
+        TOKEN_CACHE.store_token(test_token.clone())?;
+
+        // Get valid token
+        let cached = TOKEN_CACHE.get_valid_token(
+            "test_tenant",
+            "test_user",
+            "test_spn",
+        );
+        assert!(cached.is_some());
+        let cached = cached.unwrap();
+        assert_eq!(cached.access_token, "test_access_token");
+        assert_eq!(cached.refresh_token, Some("test_refresh_token".to_string()));
+
+        // Clear cache
+        TOKEN_CACHE.clear()?;
+        
+        // Token should be gone
+        let cached = TOKEN_CACHE.get_valid_token(
+            "test_tenant",
+            "test_user",
+            "test_spn",
+        );
+        assert!(cached.is_none());
+
+        Ok(())
     }
 }

@@ -20,3 +20,34 @@ async fn login_errors_are_propagated_on_init() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[cfg(feature = "aad")]
+mod aad_tests {
+    use tiberius::{AuthMethod, Config};
+
+    #[test]
+    fn test_aad_interactive_auth_cache_enabled() {
+        let mut config = Config::new();
+        config.set_authentication(AuthMethod::aad_interactive("test_user@domain.com"));
+        
+        // By default, token cache should be enabled
+        if let Some(auth) = config.authentication().as_aad_auth() {
+            assert!(auth.token_cache_enabled);
+        } else {
+            panic!("Expected AADInteractive auth method");
+        }
+    }
+
+    #[test]
+    fn test_aad_interactive_auth_cache_disabled() {
+        let mut config = Config::new();
+        config.set_authentication(AuthMethod::aad_interactive_with_cache("test_user@domain.com", false));
+        
+        // Token cache should be disabled
+        if let Some(auth) = config.authentication().as_aad_auth() {
+            assert!(!auth.token_cache_enabled);
+        } else {
+            panic!("Expected AADInteractive auth method");
+        }
+    }
+}

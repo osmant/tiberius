@@ -22,7 +22,7 @@ fn connect_to_custom_cert_instance_ado() -> Result<()> {
 
     rt.block_on(async {
         let mut config = Config::from_ado_string("server=tcp:localhost,1433;IntegratedSecurity=true;TrustServerCertificateCA=docker/certs/customCA.crt")?;
-        config.authentication(AuthMethod::sql_server(
+        config.set_authentication(AuthMethod::sql_server(
             "sa",
             "<YourStrong@Passw0rd>",
         ));
@@ -61,7 +61,7 @@ fn connect_to_custom_cert_instance_jdbc() -> Result<()> {
         let mut config = Config::from_jdbc_string(
             "jdbc:sqlserver://localhost:1433;TrustServerCertificateCA=docker{/}certs{/}customCA.crt",
         )?;
-        config.authentication(AuthMethod::sql_server("sa", "<YourStrong@Passw0rd>"));
+        config.set_authentication(AuthMethod::sql_server("sa", "<YourStrong@Passw0rd>"));
 
         let tcp = TcpStream::connect(config.get_addr()).await?;
 
@@ -89,7 +89,7 @@ fn connect_to_custom_cert_instance_without_ca() -> Result<()> {
 
     rt.block_on(async {
         let mut config = Config::new();
-        config.authentication(AuthMethod::sql_server("sa", "<YourStrong@Passw0rd>"));
+        config.set_authentication(AuthMethod::sql_server("sa", "<YourStrong@Passw0rd>"));
         config.encryption(EncryptionLevel::On);
         config.host("localhost");
         config.port(1433);

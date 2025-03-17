@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
     let server = env::var("SERVER").expect("Missing SERVER environment variable.");
     config.host(server);
     config.port(1433);
-    config.authentication(AuthMethod::AADToken(
+    config.set_authentication(AuthMethod::AADToken(
         token_result.access_token().secret().to_string(),
     ));
     config.trust_cert();
