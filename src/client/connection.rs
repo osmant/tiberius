@@ -292,7 +292,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         self.send(PacketHeader::pre_login(id), msg).await?;
 
         let response: PreloginMessage = codec::collect_from(self).await?;
-        dbg!(&response);
         // threadid (should be empty when sent from server to client)
         debug_assert_eq!(response.thread_id, 0);
         Ok(response)
@@ -448,12 +447,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             AuthMethod::AADInteractive(auth) => {
                 login_message.aad_interactive(prelogin.fed_auth_required);
                 let id = self.context.next_packet_id();
-                dbg!(&login_message);
                 self.send(PacketHeader::login(id), login_message).await?;
 
                 // federated authentication
                 let fed_auth_info = self.flush_fed_auth_info().await?;
-                dbg!(&fed_auth_info);
                 self.authenticate_aad_interactive(&auth, &fed_auth_info)
                     .await?;
                 self = self.post_login_encryption(encryption);
