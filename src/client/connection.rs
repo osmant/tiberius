@@ -622,6 +622,7 @@ mod aad {
         basic::BasicClient, AuthType, AuthUrl, ClientId,
         RefreshToken, Scope, TokenResponse, TokenUrl,
     };
+    use tracing::{event, Level};
     use crate::{
         client::{AadAuth, auth::token_cache::{TOKEN_CACHE, TokenCacheEntry}},
         tds::codec::{FedAuthToken, PacketHeader, TokenFedAuthInfo},
@@ -694,6 +695,7 @@ mod aad {
                 }
             }
 
+            event!(Level::INFO, "Token not found in cache or refresh failed, performing interactive authentication");
             // Fall back to interactive authentication
             match self.perform_interactive_auth(tenant_id, &auth.user, &scope).await {
                 Ok((access_token, refresh_token, expires_in)) => {
@@ -829,10 +831,13 @@ mod aad {
 
             tracing::info!("Opening browser to: {}", auth_url);
 
+            event!(Level::INFO, "Opening browser to: {}", auth_url);
             // Open the browser with the authorization URL
             if let Err(e) = webbrowser::open(auth_url.as_str()) {
                 tracing::warn!("Failed to open web browser: {}", e);
                 tracing::warn!("Please manually navigate to: {}", auth_url);
+            } else {
+                event!(Level::INFO, "Browser opened successfully");
             }
 
             // Create shared state for the authorization code
@@ -1002,12 +1007,43 @@ mod aad {
         async fn find_available_port() -> Option<u16> {
             use tokio::net::TcpListener;
             // Try a few different ports starting from the default
-            for port in DEFAULT_PORT..DEFAULT_PORT + 10 {
-                if TcpListener::bind(("127.0.0.1", port)).await.is_ok() {
-                    return Some(port);
-                }
+            // check if the DEFAULT_PORT is available to bind?
+
+            if TcpListener::bind(("127.0.0.1", DEFAULT_PORT)).await.is_ok() {
+                event!(Level::INFO, "Found available port: {}", DEFAULT_PORT);
+                return Some(DEFAULT_PORT);
+            } else {
+                // ask OS for a free port
+                event!(Level::WARN, "Port {} is not available", DEFAULT_PORT);
+                event!(Level::INFO, "Trying to find an available port");
+
+                // Try to find an available port
+                let listener = match TcpListener::bind((DEFAULT_HOST, 0)).await {
+                    Ok(listener) => listener,
+                    Err(e) => {
+                        event!(Level::ERROR, "Failed to bind to port: {}", e);
+                        return None;
+                    }
+                };
+                
+                let local_addr = match listener.local_addr() {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        event!(Level::ERROR, "Failed to get local address: {}", e);
+                        return None;
+                    }
+                };
+                
+                let port = local_addr.port();
+                let _ = local_addr; // to drop the listener
+                
+                // Drop the listener to free the port.
+                drop(listener);
+                
+                event!(Level::INFO, "Found available port: {}", port);
+                return Some(port);
+                
             }
-            None
         }
     }
 }
