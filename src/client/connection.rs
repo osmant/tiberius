@@ -445,15 +445,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             }
             #[cfg(feature = "aad")]
             AuthMethod::AADInteractive(auth) => {
+                event!(Level::INFO, "Performing a federated authentication");
                 login_message.aad_interactive(prelogin.fed_auth_required);
                 let id = self.context.next_packet_id();
+                
+                event!(Level::INFO, "Sending login message with AAD interactive authentication");
                 self.send(PacketHeader::login(id), login_message).await?;
 
                 // federated authentication
+                event!(Level::INFO, "Retrieving federated authentication info");
                 let fed_auth_info = self.flush_fed_auth_info().await?;
+                event!(Level::INFO, "Received federated authentication info {:?}", fed_auth_info);
+                event!(Level::INFO, "Performing interactive authentication flow");
                 self.authenticate_aad_interactive(&auth, &fed_auth_info)
                     .await?;
                 self = self.post_login_encryption(encryption);
+                
+
+                event!(Level::INFO, "Federated authentication completed successfully");
             }
         }
 

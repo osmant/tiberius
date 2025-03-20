@@ -4,6 +4,7 @@ use once_cell::sync::Lazy;
 use tiberius::{error::Error, Client, Config};
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
+use tracing::event;
 
 static CONN_STR: Lazy<String> = Lazy::new(|| {
     env::var("TIBERIUS_TEST_CONNECTION_STRING").unwrap_or_else(|_| {
@@ -51,14 +52,18 @@ async fn connect_with_routing(
         match Client::connect(config.clone(), tcp.compat_write()).await {
             Ok(client) => return Ok(client),
             Err(Error::Routing { host, port }) => {
-                println!("Redirecting to: {}:{}", host, port);
+                event!(tracing::Level::INFO, "Routing to {}:{}", host, port);
                 // Update the config with the new routing information
                 config.host(&host);
                 config.port(port);
                 // Try again with the new host/port
                 continue;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                event!(tracing::Level::ERROR, "Failed to connect: {}", e);
+                // Handle other errors
+                return Err(e.into())
+            },
         }
     }
 }
